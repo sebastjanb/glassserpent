@@ -3,10 +3,23 @@
   "name": "Glass Serpent",
   "description": "Steer a serpent across a lit arena, eat crystals to grow and cut off rivals so they burst into food.",
   "appearance": {
-    "theme_color": "#5DFFB4",
+    "theme_color": "#FFFFFF",
     "icon": {
       "src": "icon.png",
       "type": "monochrome"
+    },
+    "icon_background": {
+      "colors": [
+        "#2AE89A",
+        "#0A6A48",
+        "#021A12"
+      ],
+      "stops": [
+        0.0,
+        0.55,
+        1.0
+      ],
+      "inner_glow_color": "#B8FFD8"
     }
   }
 }
