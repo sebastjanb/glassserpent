@@ -1,30 +1,31 @@
-'use strict';
-
 /* Glass Serpent — arena serpents for Meta Ray-Ban Display glasses.
-   Steer a glowing serpent round a circular arena, eat crystals to grow and
+   WebGL arena: dark panelled floor, a red-lit rim, glowing crystals, and
+   scaled serpents seen from just behind your own head. Eat crystals to grow;
    boost across a rival's path so it runs into you and bursts into food.
-   Running your head into any other serpent, or the rim, ends the round.
+   Running your head into any other serpent, or the rim, ends the round, and
+   the last three seconds play back so you see what happened.
      Left / Right   turn 45°  (head steering: turn your head)
-     Up             boost for a moment (burns a little length)
-     Down           brake turn: a tight 135° turn toward the side you last turned
-     Pinch          pause
-   After a takedown the last three seconds play back, so you see what happened. */
+     Up             boost; swipe again while boosting for longer (burns length)
+     Down           tight 135° turn toward the side you last turned
+     Pinch          pause */
 
-const VERSION = '1.0.0';
-const { g, label, plate, banner, clamp, lerp, rand, beep, noise, head, store } = GK;
+import { THREE, makeRenderer, canvasTexture, glowSprite, starfield, chaseCamera, frameClock } from './kit3d.js';
+
+const VERSION = '2.0.0';
+const { g, label, clamp, lerp, rand, beep, noise, head, store } = GK;
 const TAU = Math.PI * 2;
 const ARENA = 1500;
 const SPEED = 125, BOOST = 230, TURN = 3.4;       // units/s, units/s, rad/s
 const GAP = 7;                                      // spacing of body points
-const RIVALS = 9, FOOD = 800;
+const RIVALS = 5, FOOD = 700;
 
-let state = 'menu';    // menu | play | pause | replay | over
+let state = 'title';   // title | menu | play | pause | replay | over
 let me, snakes, food, time, best, kills, replay, replayI, killer, lastTurn = 1;
 let steerHead = store.get('serpent.head', false);
 best = store.get('serpent.best', 0);
 
 const COLOURS = ['#5dffb4', '#ff6b6b', '#ffd34d', '#7fd8ff', '#ff9be0', '#b7a3ff', '#ffb35c', '#9be15d', '#ff5cc8', '#4fe3ff'];
-const NAMES = ['Ember', 'Moss', 'Quill', 'Rune', 'Sable', 'Tansy', 'Vex', 'Wren', 'Zinc'];
+const NAMES = ['Wicket', 'Ember', 'Moss', 'Quill', 'Rune', 'Sable', 'Tansy', 'Vex', 'Zinc'];
 
 function makeSnake(x, y, len, colour, ai, name) {
   const a = rand(0, TAU);
@@ -242,146 +243,297 @@ function tick(dt) {
 }
 let recordT = 0;
 
-/* --------------------------------------------------------------- drawing */
+/* ------------------------------------------------------------------ scene */
 
-let camX = 0, camY = 0, zoom = 1;
-const sx = (x) => 300 + (x - camX) * zoom;
-const sy = (y) => 300 + (y - camY) * zoom;
+// The logic works on a flat (x, y) arena; the scene puts that on the floor as (x, 0, y).
+const renderer = makeRenderer();
+const scene = new THREE.Scene();
+scene.fog = new THREE.Fog(0x000000, 500, 1300);
+const camera = new THREE.PerspectiveCamera(60, 1, 1, 6000);
+const chase = chaseCamera(camera);
+const clock = frameClock();
+scene.add(new THREE.HemisphereLight(0xc8d8ff, 0x101018, 1.0));
+const key = new THREE.DirectionalLight(0xffffff, 1.3);
+key.position.set(200, 600, 300);
+scene.add(key);
+const stars = starfield(1200, 3000, 0xb8d0ff, 1.5);
+scene.add(stars);
 
-function drawArena() {
-  // Faint hex dots for motion, then the rim.
-  g.fillStyle = '#1b2a33';
-  const step = 60;
-  const x0 = Math.floor((camX - 300 / zoom) / step) * step, y0 = Math.floor((camY - 300 / zoom) / step) * step;
-  for (let x = x0; x < camX + 300 / zoom + step; x += step) {
-    for (let y = y0; y < camY + 300 / zoom + step; y += step) {
-      if (x * x + y * y > ARENA * ARENA) continue;
-      const off = (Math.round(y / step) % 2) * step / 2;
-      g.fillRect(sx(x + off) - 1.5, sy(y) - 1.5, 3, 3);
-    }
+// Floor: dark panels with fine seams and the odd lit stud.
+const floorTex = canvasTexture(256, 256, (c, w, h) => {
+  c.fillStyle = '#121418'; c.fillRect(0, 0, w, h);
+  c.fillStyle = '#16191e'; c.fillRect(3, 3, w / 2 - 6, h / 2 - 6); c.fillRect(w / 2 + 3, h / 2 + 3, w / 2 - 6, h / 2 - 6);
+  c.strokeStyle = 'rgba(255,255,255,.07)'; c.lineWidth = 2; c.strokeRect(1, 1, w - 2, h - 2);
+  c.beginPath(); c.moveTo(w / 2, 0); c.lineTo(w / 2, h); c.moveTo(0, h / 2); c.lineTo(w, h / 2); c.stroke();
+  for (const [x, y] of [[8, 8], [w - 8, 8], [8, h - 8], [w - 8, h - 8]]) { c.fillStyle = '#5a6270'; c.beginPath(); c.arc(x, y, 2.5, 0, Math.PI * 2); c.fill(); }
+}, true);
+floorTex.repeat.set(ARENA / 60, ARENA / 60);
+const floor = new THREE.Mesh(new THREE.CircleGeometry(ARENA + 40, 96), new THREE.MeshStandardMaterial({ map: floorTex, metalness: 0.3, roughness: 0.6 }));
+floor.rotation.x = -Math.PI / 2;
+scene.add(floor);
+
+// Rim: a red-lit wall with a dashed light strip and posts.
+const rim = new THREE.Group();
+rim.add(new THREE.Mesh(new THREE.CylinderGeometry(ARENA + 4, ARENA + 4, 26, 128, 1, true), new THREE.MeshStandardMaterial({ color: 0x3a0a14, emissive: 0xff2a4a, emissiveIntensity: 0.35, side: THREE.DoubleSide })));
+rim.children[0].position.y = 13;
+const dashTex = canvasTexture(256, 8, (c, w, h) => { c.fillStyle = '#000'; c.fillRect(0, 0, w, h); c.fillStyle = '#ff5a7a'; for (let x = 0; x < w; x += 32) c.fillRect(x, 0, 18, h); }, true);
+dashTex.repeat.set(160, 1);
+const strip = new THREE.Mesh(new THREE.CylinderGeometry(ARENA - 6, ARENA - 6, 4, 128, 1, true), new THREE.MeshBasicMaterial({ map: dashTex, side: THREE.DoubleSide, transparent: true, blending: THREE.AdditiveBlending }));
+strip.position.y = 2; rim.add(strip);
+const posts = new THREE.InstancedMesh(new THREE.BoxGeometry(6, 34, 6), new THREE.MeshStandardMaterial({ color: 0x20242c }), 96);
+for (let i = 0; i < 96; i++) { const a = i / 96 * Math.PI * 2; posts.setMatrixAt(i, new THREE.Matrix4().makeTranslation(Math.cos(a) * (ARENA + 8), 17, Math.sin(a) * (ARENA + 8))); }
+rim.add(posts);
+const caps = new THREE.InstancedMesh(new THREE.SphereGeometry(4, 8, 6), new THREE.MeshBasicMaterial({ color: 0xffd0e0 }), 96);
+for (let i = 0; i < 96; i++) { const a = i / 96 * Math.PI * 2; caps.setMatrixAt(i, new THREE.Matrix4().makeTranslation(Math.cos(a) * (ARENA + 8), 36, Math.sin(a) * (ARENA + 8))); }
+rim.add(caps);
+scene.add(rim);
+
+// Scales: diamond pattern, tinted per serpent and per band through instance colours.
+const scaleTex = canvasTexture(128, 128, (c, w, h) => {
+  c.fillStyle = '#ffffff'; c.fillRect(0, 0, w, h);
+  for (let y = -16; y < h + 16; y += 16) for (let x = -16; x < w + 16; x += 16) {
+    const ox = (y / 16) % 2 ? 8 : 0;
+    c.fillStyle = 'rgba(0,0,0,.28)'; c.beginPath(); c.moveTo(x + ox, y - 8); c.lineTo(x + ox + 8, y); c.lineTo(x + ox, y + 8); c.lineTo(x + ox - 8, y); c.closePath(); c.fill();
+    c.fillStyle = 'rgba(255,255,255,.35)'; c.fillRect(x + ox - 1, y - 5, 2, 3);
   }
-  g.strokeStyle = '#ff5c5c'; g.lineWidth = 6;
-  g.beginPath(); g.arc(sx(0), sy(0), ARENA * zoom, 0, TAU); g.stroke();
-  g.strokeStyle = 'rgba(255,92,92,.25)'; g.lineWidth = 20;
-  g.beginPath(); g.arc(sx(0), sy(0), ARENA * zoom + 12, 0, TAU); g.stroke();
+});
+const bodyGeo = new THREE.SphereGeometry(1, 16, 12);
+const bodyMat = new THREE.MeshStandardMaterial({ map: scaleTex, metalness: 0.25, roughness: 0.45 });
+const MAXSEG = 700;
+const pools = new Map();     // snake -> { body: InstancedMesh, head: Group }
+
+function patternFor(colour) {
+  const base = new THREE.Color(colour);
+  const dark = base.clone().multiplyScalar(0.35);
+  const light = base.clone().lerp(new THREE.Color(0xffffff), 0.45);
+  return [base, dark, light];
 }
 
+function poolFor(s) {
+  let p = pools.get(s);
+  if (p) return p;
+  const body = new THREE.InstancedMesh(bodyGeo, bodyMat, MAXSEG);
+  body.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+  body.frustumCulled = false;
+  const pat = patternFor(s.colour);
+  for (let i = 0; i < MAXSEG; i++) {
+    // Bands: mostly base colour, a dark saddle every few segments, pale belly glints.
+    const k = i % 9;
+    body.setColorAt(i, k === 0 || k === 1 ? pat[1] : k === 5 ? pat[2] : pat[0]);
+  }
+  const headG = new THREE.Group();
+  const skull = new THREE.Mesh(new THREE.SphereGeometry(1, 18, 14), new THREE.MeshStandardMaterial({ map: scaleTex, color: pat[0], metalness: 0.25, roughness: 0.4 }));
+  skull.scale.set(1.25, 0.8, 1.05); headG.add(skull);
+  for (const z of [-0.55, 0.55]) {
+    const eye = new THREE.Mesh(new THREE.SphereGeometry(0.28, 10, 8), new THREE.MeshBasicMaterial({ color: 0xffe66a })); eye.position.set(0.55, 0.42, z); headG.add(eye);
+    const pupil = new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.36, 0.1), new THREE.MeshBasicMaterial({ color: 0x000000 })); pupil.position.set(0.8, 0.42, z); headG.add(pupil);
+  }
+  const glow = glowSprite(s.colour, 3.2); glow.position.y = -0.5; glow.material.opacity = 0.5; headG.add(glow);
+  scene.add(body, headG);
+  p = { body, head: headG };
+  pools.set(s, p);
+  return p;
+}
+function dropPools(live) {
+  for (const [s, p] of pools) if (!live.has(s)) { scene.remove(p.body, p.head); p.body.dispose(); pools.delete(s); }
+}
+
+const _m = new THREE.Matrix4(), _q = new THREE.Quaternion(), _p = new THREE.Vector3(), _s = new THREE.Vector3(), _e = new THREE.Euler();
+function drawSerpent(s, pts, r, ang, now) {
+  const p = poolFor(s);
+  const n = Math.min(MAXSEG, pts.length);
+  for (let i = 0; i < n; i++) {
+    const q = pts[i];
+    const x = q.x !== undefined ? q.x : q[0], y = q.y !== undefined ? q.y : q[1];
+    const taper = i > n - 8 ? 0.45 + 0.07 * (n - i) : 1;
+    const rr = r * taper;
+    _m.compose(_p.set(x, rr * 0.85, y), _q.identity(), _s.set(rr, rr * 0.85, rr));
+    p.body.setMatrixAt(i, _m);
+  }
+  p.body.count = n;
+  p.body.instanceMatrix.needsUpdate = true;
+  if (p.body.instanceColor) p.body.instanceColor.needsUpdate = true;
+  const h = pts[0];
+  const hx = h.x !== undefined ? h.x : h[0], hy = h.y !== undefined ? h.y : h[1];
+  p.head.position.set(hx, r * 1.0, hy);
+  p.head.rotation.set(0, -(ang || 0), 0);
+  p.head.scale.setScalar(r * 1.15);
+}
+
+// Food: one instanced crystal set, each tinted.
+const foodMesh = new THREE.InstancedMesh(new THREE.OctahedronGeometry(1, 0), new THREE.MeshBasicMaterial({ color: 0xffffff }), 1400);
+foodMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+foodMesh.frustumCulled = false;
+scene.add(foodMesh);
+const _c = new THREE.Color();
 function drawFood(now) {
+  let n = 0;
   for (const f of food) {
-    const x = sx(f.x), y = sy(f.y);
-    if (x < -10 || x > 610 || y < -10 || y > 610) continue;
-    const r = (f.v >= 2 ? 7 : f.v >= 1 ? 5 : 3.5) * Math.max(0.7, zoom) * (1 + Math.sin(now / 300 + f.t) * 0.15);
-    g.fillStyle = f.c;
-    g.beginPath(); g.moveTo(x, y - r * 1.3); g.lineTo(x + r, y); g.lineTo(x, y + r * 1.3); g.lineTo(x - r, y); g.closePath(); g.fill();
+    if (n >= 1400) break;
+    const r = f.v >= 2 ? 6 : f.v >= 1 ? 4.5 : 3;
+    _e.set(0, now / 600 + f.t, 0); _q.setFromEuler(_e);
+    _m.compose(_p.set(f.x, r + 2 + Math.sin(now / 300 + f.t) * 1.2, f.y), _q, _s.set(r, r * 1.5, r));
+    foodMesh.setMatrixAt(n, _m);
+    foodMesh.setColorAt(n, _c.set(f.c));
+    n++;
   }
+  foodMesh.count = n;
+  foodMesh.instanceMatrix.needsUpdate = true;
+  if (foodMesh.instanceColor) foodMesh.instanceColor.needsUpdate = true;
 }
 
-function drawBody(pts, colour, r, isMe, a, boosting) {
-  const R = r * zoom;
-  // Tail to head so the head sits on top. Alternate shading gives the coil its bands.
-  for (let i = pts.length - 1; i >= 0; i--) {
-    const p = pts[i];
-    const x = sx(p.x !== undefined ? p.x : p[0]), y = sy(p.y !== undefined ? p.y : p[1]);
-    if (x < -40 || x > 640 || y < -40 || y > 640) continue;
-    const taper = i > pts.length - 6 ? 0.6 + 0.08 * (pts.length - i) : 1;
-    g.fillStyle = Math.floor(i / 3) % 2 ? colour : shade(colour);
-    g.beginPath(); g.arc(x, y, R * taper, 0, TAU); g.fill();
-  }
-  if (boosting) {
-    g.strokeStyle = 'rgba(255,255,255,.5)'; g.lineWidth = 2;
-    const p = pts[0]; const x = sx(p.x !== undefined ? p.x : p[0]), y = sy(p.y !== undefined ? p.y : p[1]);
-    g.beginPath(); g.arc(x, y, R + 4, 0, TAU); g.stroke();
-  }
-  if (a !== undefined) {
-    const p = pts[0]; const x = sx(p.x), y = sy(p.y);
-    for (const side of [-1, 1]) {
-      const ex = x + Math.cos(a + side * 0.6) * R * 0.55, ey = y + Math.sin(a + side * 0.6) * R * 0.55;
-      g.fillStyle = '#fff'; g.beginPath(); g.arc(ex, ey, R * 0.32, 0, TAU); g.fill();
-      g.fillStyle = '#000'; g.beginPath(); g.arc(ex + Math.cos(a) * R * 0.12, ey + Math.sin(a) * R * 0.12, R * 0.16, 0, TAU); g.fill();
-    }
-  }
-}
-const shadeCache = {};
-function shade(c) {
-  if (shadeCache[c]) return shadeCache[c];
-  const n = parseInt(c.slice(1), 16);
-  const r = (n >> 16) * 0.6, gg = ((n >> 8) & 255) * 0.6, b = (n & 255) * 0.6;
-  return (shadeCache[c] = `rgb(${r | 0},${gg | 0},${b | 0})`);
-}
+/* ----------------------------------------------------------------- render */
 
-let lastNow = 0;
-function render(now) {
-  const prevNow = lastNow || now; lastNow = now;
-  g.fillStyle = '#000'; g.fillRect(0, 0, 600, 600);
-  if (!snakes) { snakes = []; food = []; for (let i = 0; i < 200; i++) randomFood(); }
+const want = new THREE.Vector3(), at = new THREE.Vector3();
+let menuA = 0;
 
-  if (state === 'replay' || state === 'over') {
-    const f = replay[Math.min(replay.length - 1, Math.floor(replayI || 0))] || [];
-    const mine = f.find((s) => s.me);
-    if (mine && mine.p.length) { camX = mine.p[0][0]; camY = mine.p[0][1]; }
-    drawArena(); drawFood(now);
-    for (const s of f) drawBody(s.p, s.c, s.r, s.me);
-    if (state === 'replay') {
-      plate(170, 12, 260, 40);
-      label('REPLAY  ·  half speed', 300, 39, 18, '#ffd34d', 'center');
-      return;
-    }
-    const by = killer === 'rim' ? 'You hit the rim' : killer ? 'You ran into ' + killer.name : '';
-    return banner(now, 'BURST', '#ff6b6b', 'Pinch to play again', [by, 'Length ' + Math.round(me.len) + '  ·  takedowns ' + kills + '  ·  best ' + best]);
+function render3d(now) {
+  const dt = clock(now);
+  if (!snakes) { snakes = []; food = []; for (let i = 0; i < 300; i++) randomFood(); }
+  const live = new Set();
+  let camHead = null, camAng = 0;
+  if ((state === 'replay' || state === 'over') && replay.length) {
+    const f = replay[Math.min(replay.length - 1, Math.floor(replayI || 0))];
+    f.forEach((rs, i) => { const key = replayKeys[i] || (replayKeys[i] = { colour: rs.c }); key.colour = rs.c; live.add(key); drawSerpent(key, rs.p, rs.r, 0, now); if (rs.me) camHead = { x: rs.p[0][0], y: rs.p[0][1] }; });
+    // Replay: look down from above and behind so the whole crash is in view.
+    if (camHead) { want.set(camHead.x - 160, 260, camHead.y + 160); at.set(camHead.x, 0, camHead.y); chase.update(want, at, dt, 4); }
+  } else {
+    for (const s of snakes) if (!s.dead) { live.add(s); drawSerpent(s, s.pts, radius(s), s.a, now); }
+    if (me && !me.dead && (state === 'play' || state === 'pause')) { camHead = me; camAng = me.a; }
+    else { menuA += dt * 0.15; camHead = { x: Math.cos(menuA) * 500, y: Math.sin(menuA) * 500 }; camAng = menuA + Math.PI / 2; }
+    const back = 150 + (me ? Math.min(120, me.len / 6) : 0);
+    want.set(camHead.x - Math.cos(camAng) * back, 95 + back * 0.25, camHead.y - Math.sin(camAng) * back);
+    at.set(camHead.x + Math.cos(camAng) * 140, 0, camHead.y + Math.sin(camAng) * 140);
+    chase.update(want, at, dt, 5);
   }
-
-  if (me && !me.dead) {
-    // Follow by elapsed time, not by frame count, so slow frames do not leave the camera behind.
-    const k = Math.min(1, (now - prevNow) / 60);
-    camX = lerp(camX, me.x, k); camY = lerp(camY, me.y, k);
-    zoom = lerp(zoom, clamp(1.1 - me.len / 2500, 0.55, 1.05), k * 0.2);
-  } else { camX = Math.sin(now / 5000) * 300; camY = Math.cos(now / 5000) * 300; zoom = 0.8; }
-  drawArena();
+  dropPools(live);
   drawFood(now);
-  for (const s of snakes) if (!s.dead && s !== me) drawBody(s.pts, s.colour, radius(s), false, s.a, s.boost > 0);
-  if (me && !me.dead) drawBody(me.pts, me.colour, radius(me), true, me.a, me.boost > 0);
-
-  if (state === 'menu') return GK.drawMenu(menu, now, 170);
-  hud(now);
-  if (state === 'pause') banner(now, 'PAUSED', '#fff', 'Pinch to continue', ['Down: back to the menu']);
+  stars.position.copy(camera.position);
+  renderer.render(scene, camera);
 }
+const replayKeys = [];
+
+/* -------------------------------------------------------------------- HUD */
+
+const FONT2 = (size, w = 800) => `${w} ${size}px "Avenir Next Rounded", "Nunito", "Arial Rounded MT Bold", ${GK.FONT}`;
+function rt(t, x, y, size, colour = '#fff', align = 'left', w = 800) { g.font = FONT2(size, w); g.textAlign = align; g.fillStyle = colour; g.fillText(t, x, y); }
+function pill(x, y, w, h, stroke = 'rgba(127,216,255,.85)') { g.fillStyle = 'rgba(10,14,20,.6)'; g.beginPath(); g.roundRect(x, y, w, h, h / 2); g.fill(); g.strokeStyle = stroke; g.lineWidth = 2.5; g.stroke(); }
 
 function hud(now) {
-  plate(12, 8, 150, 62); plate(438, 8, 150, 62);
-  label('LENGTH', 24, 28, 13, '#a9adb3'); label(String(Math.round(me.len)), 24, 58, 24, '#5dffb4');
-  label('BEST', 576, 28, 13, '#a9adb3', 'right'); label(String(Math.max(best, Math.round(me.len))), 576, 58, 24, '#fff', 'right');
-  if (kills) { plate(240, 8, 120, 40); label('✕ ' + kills, 300, 36, 18, '#ffd34d', 'center'); }
-  // Leaderboard of the three longest.
-  const top = snakes.filter((s) => !s.dead).sort((a, b) => b.len - a.len).slice(0, 3);
-  plate(438, 76, 150, 74);
-  top.forEach((s, i) => label((i + 1) + ' ' + s.name + '  ' + Math.round(s.len), 450, 96 + i * 21, 14, s === me ? '#5dffb4' : '#c3c7cd', 'left', 600));
-  // Mini-map.
-  const cx = 540, cy = 540, R = 46;
-  g.fillStyle = 'rgba(0,0,0,.6)'; g.beginPath(); g.arc(cx, cy, R + 3, 0, TAU); g.fill();
-  g.strokeStyle = 'rgba(255,92,92,.6)'; g.lineWidth = 1.5; g.beginPath(); g.arc(cx, cy, R, 0, TAU); g.stroke();
-  for (const s of snakes) {
-    if (s.dead) continue;
-    g.fillStyle = s === me ? '#fff' : s.colour;
-    const r = s === me ? 3.5 : 2;
-    g.fillRect(cx + s.x / ARENA * R - r / 2, cy + s.y / ARENA * R - r / 2, r, r);
+  const ranked = snakes.filter((s) => !s.dead).sort((a, b) => b.len - a.len);
+  const rank = ranked.indexOf(me) + 1;
+  const score = Math.round(me.len * 10);
+  // Score pill with rank, and the goal under it.
+  pill(16, 14, 210, 50);
+  g.fillStyle = '#7fd8ff'; g.beginPath(); g.arc(40, 39, 6, 0, Math.PI * 2); g.fill();
+  rt(score.toLocaleString(), 54, 50, 30);
+  pill(160, 22, 56, 34); rt('#' + rank, 188, 46, 18, '#7fd8ff', 'center');
+  const goal = Math.round(Math.max(best * 10, 2000) / 100) * 100;
+  rt('Goal ' + score.toLocaleString() + ' / ' + goal.toLocaleString(), 26, 88, 15, '#e8eef6', 'left', 700);
+  // Leader board line on the right.
+  const lead = ranked[0];
+  rt('#' + rank + ' of ' + ranked.length, 352, 46, 16, '#7fd8ff', 'right');
+  g.fillStyle = 'rgba(255,255,255,.35)'; g.fillRect(360, 30, 2, 20);
+  if (lead) {
+    rt(lead === me ? 'You lead' : 'Leader', 372, 46, 16, '#e8eef6', 'left', 700);
+    g.fillStyle = lead.colour; g.beginPath(); g.arc(452, 40, 6, 0, Math.PI * 2); g.fill();
+    rt((lead === me ? '' : lead.name + ' ') + Math.round(lead.len * 10).toLocaleString(), 576, 46, 16, '#fff', 'right');
   }
-  if (steerHead && !GK.headLive() && GK.blink(now, 800)) label('Head steering waiting — swipes work', 300, 590, 14, '#ffb35c', 'center');
+  // Radar ring: an arc toward each rival, coloured by them; nearer is thicker.
+  g.strokeStyle = 'rgba(255,255,255,.25)'; g.lineWidth = 1.5;
+  g.beginPath(); g.arc(300, 330, 250, 0, Math.PI * 2); g.stroke();
+  for (const s of snakes) {
+    if (s === me || s.dead) continue;
+    const d = Math.hypot(s.x - me.x, s.y - me.y);
+    if (d > 1400) continue;
+    // Angle relative to where we are heading, drawn so ahead is up.
+    const rel = Math.atan2(s.y - me.y, s.x - me.x) - me.a - Math.PI / 2;
+    g.strokeStyle = s.colour; g.lineWidth = d < 400 ? 8 : 4;
+    g.beginPath(); g.arc(300, 330, 250, rel - 0.12, rel + 0.12); g.stroke();
+  }
+  // Rim warning: an arc in red toward the wall when it is near.
+  const toRim = ARENA - Math.hypot(me.x, me.y);
+  if (toRim < 350) {
+    const rel = Math.atan2(me.y, me.x) - me.a - Math.PI / 2;
+    g.strokeStyle = `rgba(255,70,90,${clamp(1 - toRim / 350, 0.2, 0.9)})`; g.lineWidth = 6;
+    g.beginPath(); g.arc(300, 330, 250, rel - 0.5, rel + 0.5); g.stroke();
+  }
+  // Boost pills.
+  pill(190, 548, 220, 36, 'rgba(255,255,255,.7)');
+  rt('Boost', 180, 572, 16, '#fff', 'right');
+  const bars = clamp(Math.floor((me.len - 50) / 25), 0, 8);
+  for (let i = 0; i < 8; i++) { g.fillStyle = i < bars ? (me.boost > 0 ? '#ffffff' : '#7fd8ff') : 'rgba(255,255,255,.15)'; g.beginPath(); g.roundRect(204 + i * 25, 558, 20, 16, 8); g.fill(); }
+  if (kills) rt('✕ ' + kills, 576, 88, 16, '#ffd34d', 'right');
+  if (state === 'play' && time < 10) {
+    pill(110, 470, 380, 44, 'rgba(255,255,255,.5)');
+    rt(time < 5 ? '←  → Swipe to turn' : '↑ Swipe up to boost', 300, 499, 17, '#fff', 'center', 700);
+  }
+  if (steerHead && !GK.headLive() && GK.blink(now, 800)) rt('Head steering waiting — swipes work', 300, 450, 15, '#ffb35c', 'center', 700);
 }
 
-/* ------------------------------------------------------------------ menu */
+function card(x, y, w, h, on, icon, title, sub) {
+  g.fillStyle = 'rgba(22,26,32,.92)'; g.beginPath(); g.roundRect(x, y, w, h, 22); g.fill();
+  g.strokeStyle = on ? '#4fd8ff' : 'rgba(255,255,255,.18)'; g.lineWidth = on ? 4 : 2; g.stroke();
+  rt(icon, x + w / 2, y + 74, 44, on ? '#4fd8ff' : '#7a8696', 'center');
+  rt(title, x + w / 2, y + 124, 22, on ? '#fff' : '#a9adb3', 'center');
+  rt(sub, x + w / 2, y + 152, 14, '#c3c7cd', 'center', 700);
+}
 
-const menu = GK.menu('GLASS SERPENT', '#5dffb4', [
-  { text: 'Play', hint: () => 'Best length ' + best, act: start },
-  { text: () => 'Steering · ' + (steerHead ? 'Head' : 'Swipe'), hint: 'Head steering asks for motion access once',
-    act: () => { steerHead = !steerHead; store.set('serpent.head', steerHead); if (steerHead) GK.askHead(); } },
-  { text: () => 'Invert head · ' + (head.invert ? 'on' : 'off'), act: () => GK.setInvert(!head.invert) },
-  { text: () => 'Sound · ' + (GK.sound.on ? 'on' : 'off'), act: () => GK.setSound(!GK.sound.on) },
-]);
+let menuI = 0;
+const CARDS = () => [
+  { icon: '∞', title: 'Arena', sub: best ? 'Best ' + (best * 10).toLocaleString() : 'No run yet', act: start },
+  { icon: '◎', title: 'Steering', sub: steerHead ? 'Head' : 'Swipes', act: () => { steerHead = !steerHead; store.set('serpent.head', steerHead); if (steerHead) GK.askHead(); } },
+  { icon: '♪', title: 'Sound', sub: GK.sound.on ? 'On' : 'Off', act: () => GK.setSound(!GK.sound.on) },
+];
 
-/* ----------------------------------------------------------------- input */
+function menuScreen() {
+  rt('Serpent', 300, 60, 26, '#fff', 'center');
+  CARDS().forEach((c, i) => card(300 - 85 + (i - menuI) * 200, 190, 170, 200, i === menuI, c.icon, c.title, c.sub));
+  rt('Swipe to choose · Pinch to select · Back to return', 300, 560, 15, '#e8eef6', 'center', 700);
+}
+
+function titleScreen(now) {
+  rt('SERPENT', 300, 220, 64, '#fff', 'center', 900);
+  rt('Grow. Cut them off. Burst them.', 300, 262, 17, '#7fd8ff', 'center', 700);
+  pill(190, 430, 220, 56, 'rgba(79,216,255,.9)');
+  rt('Pinch to play', 300, 466, 20, '#fff', 'center');
+}
+
+function panel(now, title, lines, prompt) {
+  g.fillStyle = 'rgba(14,18,24,.9)'; g.beginPath(); g.roundRect(70, 180, 460, 120 + lines.length * 28, 22); g.fill();
+  g.strokeStyle = '#4fd8ff'; g.lineWidth = 3; g.stroke();
+  rt(title, 300, 230, 34, '#fff', 'center');
+  lines.forEach((t, i) => rt(t, 300, 266 + i * 28, 16, '#e8eef6', 'center', 700));
+  if (GK.blink(now)) rt(prompt, 300, 266 + lines.length * 28 + 20, 17, '#4fd8ff', 'center');
+}
+
+function render(now) {
+  render3d(now);
+  g.clearRect(0, 0, 600, 600);
+  if (state === 'title') return titleScreen(now);
+  if (state === 'menu') return menuScreen();
+  if (state === 'replay') { pill(170, 14, 260, 44, '#ffd34d'); rt('Replay · half speed', 300, 43, 17, '#ffd34d', 'center'); return; }
+  if (state === 'over') {
+    const by = killer === 'rim' ? 'You hit the rim' : killer ? 'You ran into ' + killer.name : '';
+    return panel(now, 'Burst', [by, 'Score ' + Math.round(me.len * 10).toLocaleString() + '  ·  takedowns ' + kills + '  ·  best ' + (best * 10).toLocaleString()], 'Pinch to play again');
+  }
+  hud(now);
+  if (state === 'pause') panel(now, 'Paused', ['Down: back to the menu'], 'Pinch to continue');
+}
+
+/* ------------------------------------------------------------------ input */
 
 GK.input.onKey = (k) => {
-  if (state === 'menu') { if (steerHead && head.state === 'off') GK.askHead(); return GK.menuKey(menu, k); }
+  if (state === 'title') { if (k === 'Enter') { state = 'menu'; if (steerHead) GK.askHead(); } return; }
+  if (state === 'menu') {
+    const cards = CARDS();
+    if (k === 'ArrowLeft') menuI = (menuI + cards.length - 1) % cards.length;
+    else if (k === 'ArrowRight') menuI = (menuI + 1) % cards.length;
+    else if (k === 'Enter') cards[menuI].act();
+    else if (k === 'ArrowDown') state = 'title';
+    beep(560, 0.03);
+    return;
+  }
   if (state === 'replay') { if (k === 'Enter') state = 'over'; return; }
   if (state === 'over') { if (k === 'Enter') start(); else if (k === 'ArrowDown') state = 'menu'; return; }
   if (state === 'pause') { if (k === 'Enter') state = 'play'; else if (k === 'ArrowDown') state = 'menu'; return; }
@@ -389,8 +541,13 @@ GK.input.onKey = (k) => {
   if (k === 'ArrowLeft') { me.want = me.a - Math.PI / 4; lastTurn = -1; }
   else if (k === 'ArrowRight') { me.want = me.a + Math.PI / 4; lastTurn = 1; }
   else if (k === 'ArrowDown') me.want = me.a + lastTurn * Math.PI * 0.75;
-  else if (k === 'ArrowUp') { if (me.len > 50) { me.boost = 1.2; beep(300, 0.3, 'sawtooth', 0.2, 300); } else beep(150, 0.1); }
+  else if (k === 'ArrowUp') {
+    // A second swipe while boosting makes it last longer.
+    if (me.len > 50) { me.boost = me.boost > 0 ? Math.min(2.6, me.boost + 1.2) : 1.2; beep(300, 0.3, 'sawtooth', 0.2, 300); } else beep(150, 0.1);
+  }
 };
 
 GK.loop.onHidden = () => { if (state === 'play') state = 'pause'; };
 GK.run(tick, render);
+
+window.serpent = { get state() { return state; }, set state(x) { state = x; }, start, tick, think, get me() { return me; }, get snakes() { return snakes; }, get kills() { return kills; }, get time() { return time; } };
