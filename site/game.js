@@ -11,7 +11,7 @@
 
 import { THREE, makeRenderer, canvasTexture, glowSprite, starfield, chaseCamera, frameClock } from './kit3d.js';
 
-const VERSION = '2.0.0';
+const VERSION = '3.0.0';
 const { g, label, clamp, lerp, rand, beep, noise, head, store } = GK;
 const TAU = Math.PI * 2;
 const ARENA = 1500;
@@ -253,23 +253,49 @@ const camera = new THREE.PerspectiveCamera(60, 1, 1, 6000);
 const chase = chaseCamera(camera);
 const clock = frameClock();
 scene.add(new THREE.HemisphereLight(0xc8d8ff, 0x101018, 1.0));
-const key = new THREE.DirectionalLight(0xffffff, 1.3);
+const key = new THREE.DirectionalLight(0xfff4e8, 1.8);
 key.position.set(200, 600, 300);
-scene.add(key);
+key.castShadow = true;
+key.shadow.mapSize.set(1024, 1024);
+key.shadow.camera.left = key.shadow.camera.bottom = -320;
+key.shadow.camera.right = key.shadow.camera.top = 320;
+key.shadow.camera.near = 10; key.shadow.camera.far = 1500;
+key.shadow.bias = -0.0005;
+scene.add(key, key.target);
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.15;
+// Coloured rim lights round the arena.
+for (let i = 0; i < 6; i++) { const a = i / 6 * Math.PI * 2; const pl = new THREE.PointLight([0xff3a6a, 0x3a8aff, 0xa04aff][i % 3], 60000, 900, 2); pl.position.set(Math.cos(a) * (ARENA - 80), 120, Math.sin(a) * (ARENA - 80)); scene.add(pl); }
 const stars = starfield(1200, 3000, 0xb8d0ff, 1.5);
 scene.add(stars);
 
 // Floor: dark panels with fine seams and the odd lit stud.
-const floorTex = canvasTexture(256, 256, (c, w, h) => {
-  c.fillStyle = '#121418'; c.fillRect(0, 0, w, h);
-  c.fillStyle = '#16191e'; c.fillRect(3, 3, w / 2 - 6, h / 2 - 6); c.fillRect(w / 2 + 3, h / 2 + 3, w / 2 - 6, h / 2 - 6);
-  c.strokeStyle = 'rgba(255,255,255,.07)'; c.lineWidth = 2; c.strokeRect(1, 1, w - 2, h - 2);
-  c.beginPath(); c.moveTo(w / 2, 0); c.lineTo(w / 2, h); c.moveTo(0, h / 2); c.lineTo(w, h / 2); c.stroke();
-  for (const [x, y] of [[8, 8], [w - 8, 8], [8, h - 8], [w - 8, h - 8]]) { c.fillStyle = '#5a6270'; c.beginPath(); c.arc(x, y, 2.5, 0, Math.PI * 2); c.fill(); }
+// Floor: hexagonal panels with glowing seams; one tile is 3R × √3R so the pattern repeats.
+const HEXR = 64, HW2 = HEXR * 3, HH2 = Math.round(HEXR * Math.sqrt(3));
+function hexPath(c, cx, cy) { c.beginPath(); for (let k = 0; k < 6; k++) { const a = k / 6 * Math.PI * 2; c.lineTo(cx + Math.cos(a) * (HEXR - 3), cy + Math.sin(a) * (HEXR - 3)); } c.closePath(); }
+const hexCentres = [];
+for (const [ox, oy] of [[0, 0], [HW2, 0], [0, HH2], [HW2, HH2], [HEXR * 1.5, HH2 / 2], [HEXR * 1.5, -HH2 / 2], [HEXR * 1.5, HH2 * 1.5], [-HEXR * 1.5, HH2 / 2], [HW2 + HEXR * 1.5, HH2 / 2]]) hexCentres.push([ox, oy]);
+const floorTex = canvasTexture(HW2, HH2, (c, w, h) => {
+  c.fillStyle = '#06080c'; c.fillRect(0, 0, w, h);
+  hexCentres.forEach(([x, y], i) => {
+    const grd = c.createLinearGradient(x - HEXR, y - HEXR, x + HEXR, y + HEXR);
+    grd.addColorStop(0, i % 3 ? '#161a22' : '#1a1f28'); grd.addColorStop(1, '#0e1016');
+    hexPath(c, x, y); c.fillStyle = grd; c.fill();
+    c.strokeStyle = 'rgba(255,255,255,.06)'; c.lineWidth = 2; c.stroke();
+  });
+  for (let i = 0; i < 1500; i++) { c.fillStyle = `rgba(255,255,255,${Math.random() * 0.04})`; c.fillRect(Math.random() * w, Math.random() * h, 1, 1); }
 }, true);
-floorTex.repeat.set(ARENA / 60, ARENA / 60);
-const floor = new THREE.Mesh(new THREE.CircleGeometry(ARENA + 40, 96), new THREE.MeshStandardMaterial({ map: floorTex, metalness: 0.3, roughness: 0.6 }));
+const seamTex = canvasTexture(HW2, HH2, (c, w, h) => {
+  c.fillStyle = '#000'; c.fillRect(0, 0, w, h);
+  c.strokeStyle = '#3ad8ff'; c.lineWidth = 3;
+  hexCentres.forEach(([x, y]) => { c.beginPath(); for (let k = 0; k < 6; k++) { const a = k / 6 * Math.PI * 2; c.lineTo(x + Math.cos(a) * HEXR, y + Math.sin(a) * HEXR); } c.closePath(); c.stroke(); });
+}, true);
+floorTex.repeat.set(ARENA / 40, ARENA / 23); seamTex.repeat.copy(floorTex.repeat);
+const floor = new THREE.Mesh(new THREE.CircleGeometry(ARENA + 40, 96), new THREE.MeshStandardMaterial({ map: floorTex, emissive: 0xffffff, emissiveMap: seamTex, emissiveIntensity: 0.35, metalness: 0.5, roughness: 0.35 }));
 floor.rotation.x = -Math.PI / 2;
+floor.receiveShadow = true;
 scene.add(floor);
 
 // Rim: a red-lit wall with a dashed light strip and posts.
@@ -288,78 +314,142 @@ for (let i = 0; i < 96; i++) { const a = i / 96 * Math.PI * 2; caps.setMatrixAt(
 rim.add(caps);
 scene.add(rim);
 
-// Scales: diamond pattern, tinted per serpent and per band through instance colours.
-const scaleTex = canvasTexture(128, 128, (c, w, h) => {
-  c.fillStyle = '#ffffff'; c.fillRect(0, 0, w, h);
-  for (let y = -16; y < h + 16; y += 16) for (let x = -16; x < w + 16; x += 16) {
-    const ox = (y / 16) % 2 ? 8 : 0;
-    c.fillStyle = 'rgba(0,0,0,.28)'; c.beginPath(); c.moveTo(x + ox, y - 8); c.lineTo(x + ox + 8, y); c.lineTo(x + ox, y + 8); c.lineTo(x + ox - 8, y); c.closePath(); c.fill();
-    c.fillStyle = 'rgba(255,255,255,.35)'; c.fillRect(x + ox - 1, y - 5, 2, 3);
-  }
-});
-const bodyGeo = new THREE.SphereGeometry(1, 16, 12);
-const bodyMat = new THREE.MeshStandardMaterial({ map: scaleTex, metalness: 0.25, roughness: 0.45 });
-const MAXSEG = 700;
-const pools = new Map();     // snake -> { body: InstancedMesh, head: Group }
+// Serpents are continuous tubes rebuilt from their path every frame, wrapped in a
+// species pattern with scales, a shaped head with eyes and a flicking tongue.
+const SPECIES = [
+  { base: '#3ad89a', band: '#0e5a3a', belly: '#c8ffd8', kind: 'diamond' },   // the player's emerald
+  { base: '#c8402a', band: '#f2d040', belly: '#1a1a1a', kind: 'coral' },
+  { base: '#6a8ad8', band: '#e8eef8', belly: '#2a3a6a', kind: 'bands' },
+  { base: '#b8a060', band: '#4a3820', belly: '#e8d8a8', kind: 'diamond' },
+  { base: '#8a4ad8', band: '#2a0e4a', belly: '#d8c0ff', kind: 'spots' },
+  { base: '#e8a030', band: '#3a2008', belly: '#fff0c0', kind: 'bands' },
+  { base: '#2a8ac8', band: '#0a2a4a', belly: '#c0e8ff', kind: 'spots' },
+  { base: '#d84a8a', band: '#4a0a2a', belly: '#ffd0e8', kind: 'diamond' },
+  { base: '#5ab83a', band: '#1a3a0e', belly: '#e0ffb8', kind: 'bands' },
+  { base: '#d8d8e0', band: '#2a2a32', belly: '#f8f8ff', kind: 'coral' },
+];
+const skinCache = new Map();
+function skinFor(colour) {
+  if (skinCache.has(colour)) return skinCache.get(colour);
+  const sp = SPECIES[Math.max(0, COLOURS.indexOf(colour)) % SPECIES.length];
+  const tex = canvasTexture(128, 256, (c, w, h) => {
+    // u runs round the body (belly at the edges), v along it.
+    const grd = c.createLinearGradient(0, 0, w, 0);
+    grd.addColorStop(0, sp.belly); grd.addColorStop(0.22, sp.base); grd.addColorStop(0.78, sp.base); grd.addColorStop(1, sp.belly);
+    c.fillStyle = grd; c.fillRect(0, 0, w, h);
+    c.fillStyle = sp.band;
+    if (sp.kind === 'diamond') for (let y = 0; y < h; y += 64) { c.beginPath(); c.moveTo(w / 2, y); c.lineTo(w * 0.8, y + 32); c.lineTo(w / 2, y + 64); c.lineTo(w * 0.2, y + 32); c.closePath(); c.fill(); c.fillStyle = sp.base; c.beginPath(); c.moveTo(w / 2, y + 14); c.lineTo(w * 0.66, y + 32); c.lineTo(w / 2, y + 50); c.lineTo(w * 0.34, y + 32); c.closePath(); c.fill(); c.fillStyle = sp.band; }
+    else if (sp.kind === 'bands') for (let y = 0; y < h; y += 64) c.fillRect(w * 0.12, y, w * 0.76, 18);
+    else if (sp.kind === 'coral') for (let y = 0; y < h; y += 64) { c.fillRect(w * 0.1, y, w * 0.8, 16); c.fillStyle = '#111'; c.fillRect(w * 0.1, y + 16, w * 0.8, 10); c.fillRect(w * 0.1, y - 10, w * 0.8, 10); c.fillStyle = sp.band; }
+    else for (let i = 0; i < 26; i++) { c.beginPath(); c.ellipse(w * (0.25 + Math.random() * 0.5), Math.random() * h, 6 + Math.random() * 8, 8 + Math.random() * 10, 0, 0, Math.PI * 2); c.fill(); }
+    // Scales: overlapping rows of small arcs with a highlight.
+    for (let y = 0; y < h + 8; y += 8) for (let x = (y / 8) % 2 ? 4 : 0; x < w; x += 8) {
+      c.strokeStyle = 'rgba(0,0,0,.28)'; c.lineWidth = 1; c.beginPath(); c.arc(x, y, 4.5, 0.15 * Math.PI, 0.85 * Math.PI); c.stroke();
+      c.fillStyle = 'rgba(255,255,255,.12)'; c.fillRect(x - 1, y - 3, 2, 1);
+    }
+  }, true);
+  const bump = canvasTexture(64, 64, (c, w, h) => {
+    c.fillStyle = '#808080'; c.fillRect(0, 0, w, h);
+    for (let y = 0; y < h + 8; y += 8) for (let x = (y / 8) % 2 ? 4 : 0; x < w; x += 8) { const grd = c.createRadialGradient(x, y - 1, 0, x, y, 4.5); grd.addColorStop(0, '#d0d0d0'); grd.addColorStop(1, '#505050'); c.fillStyle = grd; c.beginPath(); c.arc(x, y, 4.5, 0, Math.PI * 2); c.fill(); }
+  }, true);
+  bump.colorSpace = THREE.NoColorSpace; bump.repeat.set(2, 4);
+  // A little of the pattern glows on its own, so serpents read against the dark floor.
+  const mat = new THREE.MeshStandardMaterial({ map: tex, bumpMap: bump, bumpScale: 1.2, roughness: 0.38, metalness: 0.1, emissive: 0xffffff, emissiveMap: tex, emissiveIntensity: 0.35 });
+  const out = { mat, sp };
+  skinCache.set(colour, out);
+  return out;
+}
 
-function patternFor(colour) {
-  const base = new THREE.Color(colour);
-  const dark = base.clone().multiplyScalar(0.35);
-  const light = base.clone().lerp(new THREE.Color(0xffffff), 0.45);
-  return [base, dark, light];
+const RING = 12, MAXRING = 420;
+const pools = new Map();     // serpent -> { body: Mesh with a reusable tube geometry, head: Group }
+
+function tubeGeometry() {
+  const geo = new THREE.BufferGeometry();
+  const pos = new Float32Array(MAXRING * (RING + 1) * 3), nor = new Float32Array(MAXRING * (RING + 1) * 3), uv = new Float32Array(MAXRING * (RING + 1) * 2);
+  geo.setAttribute('position', new THREE.BufferAttribute(pos, 3).setUsage(THREE.DynamicDrawUsage));
+  geo.setAttribute('normal', new THREE.BufferAttribute(nor, 3).setUsage(THREE.DynamicDrawUsage));
+  geo.setAttribute('uv', new THREE.BufferAttribute(uv, 2).setUsage(THREE.DynamicDrawUsage));
+  const idx = [];
+  for (let i = 0; i < MAXRING - 1; i++) for (let k = 0; k < RING; k++) {
+    const a = i * (RING + 1) + k, b = a + RING + 1;
+    idx.push(a, b, a + 1, a + 1, b, b + 1);
+  }
+  geo.setIndex(idx);
+  return geo;
 }
 
 function poolFor(s) {
   let p = pools.get(s);
   if (p) return p;
-  const body = new THREE.InstancedMesh(bodyGeo, bodyMat, MAXSEG);
-  body.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
-  body.frustumCulled = false;
-  const pat = patternFor(s.colour);
-  for (let i = 0; i < MAXSEG; i++) {
-    // Bands: mostly base colour, a dark saddle every few segments, pale belly glints.
-    const k = i % 9;
-    body.setColorAt(i, k === 0 || k === 1 ? pat[1] : k === 5 ? pat[2] : pat[0]);
-  }
+  const skin = skinFor(s.colour);
+  const body = new THREE.Mesh(tubeGeometry(), skin.mat);
+  body.frustumCulled = false; body.castShadow = true;
   const headG = new THREE.Group();
-  const skull = new THREE.Mesh(new THREE.SphereGeometry(1, 18, 14), new THREE.MeshStandardMaterial({ map: scaleTex, color: pat[0], metalness: 0.25, roughness: 0.4 }));
-  skull.scale.set(1.25, 0.8, 1.05); headG.add(skull);
-  for (const z of [-0.55, 0.55]) {
-    const eye = new THREE.Mesh(new THREE.SphereGeometry(0.28, 10, 8), new THREE.MeshBasicMaterial({ color: 0xffe66a })); eye.position.set(0.55, 0.42, z); headG.add(eye);
-    const pupil = new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.36, 0.1), new THREE.MeshBasicMaterial({ color: 0x000000 })); pupil.position.set(0.8, 0.42, z); headG.add(pupil);
+  const skull = new THREE.Mesh(new THREE.SphereGeometry(1, 20, 14), skin.mat);
+  skull.scale.set(1.5, 0.72, 1.05); skull.position.x = 0.35; skull.castShadow = true; headG.add(skull);
+  const jaw = new THREE.Mesh(new THREE.SphereGeometry(1, 16, 10), new THREE.MeshStandardMaterial({ color: skin.sp.belly, roughness: 0.5 }));
+  jaw.scale.set(1.35, 0.4, 0.9); jaw.position.set(0.35, -0.28, 0); headG.add(jaw);
+  for (const z of [-0.5, 0.5]) {
+    const eye = new THREE.Mesh(new THREE.SphereGeometry(0.24, 12, 10), new THREE.MeshStandardMaterial({ color: 0xffd84a, emissive: 0x6a5000, roughness: 0.1 })); eye.position.set(0.85, 0.32, z); headG.add(eye);
+    const pupil = new THREE.Mesh(new THREE.BoxGeometry(0.06, 0.3, 0.06), new THREE.MeshBasicMaterial({ color: 0x000000 })); pupil.position.set(1.05, 0.32, z * 1.1); headG.add(pupil);
   }
-  const glow = glowSprite(s.colour, 3.2); glow.position.y = -0.5; glow.material.opacity = 0.5; headG.add(glow);
+  const tongue = new THREE.Group();
+  const tmat = new THREE.MeshBasicMaterial({ color: 0xd8203a });
+  const stem = new THREE.Mesh(new THREE.BoxGeometry(0.8, 0.05, 0.08), tmat); stem.position.x = 0.4; tongue.add(stem);
+  for (const z of [-1, 1]) { const f = new THREE.Mesh(new THREE.BoxGeometry(0.35, 0.05, 0.06), tmat); f.position.set(0.95, 0, z * 0.08); f.rotation.y = z * 0.5; tongue.add(f); }
+  tongue.position.set(1.7, -0.2, 0); headG.add(tongue); headG.tongue = tongue;
+  const glow = glowSprite(s.colour, 3); glow.position.y = -0.6; glow.material.opacity = 0.35; headG.add(glow);
   scene.add(body, headG);
   p = { body, head: headG };
   pools.set(s, p);
   return p;
 }
 function dropPools(live) {
-  for (const [s, p] of pools) if (!live.has(s)) { scene.remove(p.body, p.head); p.body.dispose(); pools.delete(s); }
+  for (const [s, p] of pools) if (!live.has(s)) { scene.remove(p.body, p.head); p.body.geometry.dispose(); pools.delete(s); }
+}
+
+function drawSerpent(s, pts, r, ang, now) {
+  const p = poolFor(s);
+  const n = Math.min(MAXRING, pts.length);
+  const g2 = p.body.geometry, pos = g2.attributes.position.array, nor = g2.attributes.normal.array, uv = g2.attributes.uv.array;
+  const X = (i) => { const q = pts[Math.max(0, Math.min(n - 1, i))]; return q.x !== undefined ? q.x : q[0]; };
+  const Y = (i) => { const q = pts[Math.max(0, Math.min(n - 1, i))]; return q.y !== undefined ? q.y : q[1]; };
+  let along = 0;
+  for (let i = 0; i < n; i++) {
+    let tx = X(i - 1) - X(i + 1), ty = Y(i - 1) - Y(i + 1);
+    const tl = Math.hypot(tx, ty) || 1; tx /= tl; ty /= tl;
+    // Side vector across the body on the floor; up is up.
+    const sx = -ty, sy = tx;
+    // The body swells behind the head and tapers to a point at the tail.
+    const f = i / Math.max(1, n - 1);
+    const taper = (i < 3 ? 0.78 + i * 0.07 : 1) * (f > 0.7 ? Math.max(0.12, 1 - (f - 0.7) / 0.3 * 0.88) : 1);
+    const rr = r * taper, cx = X(i), cz = Y(i), cy = rr * 0.82;
+    if (i) along += Math.hypot(X(i) - X(i - 1), Y(i) - Y(i - 1));
+    for (let k = 0; k <= RING; k++) {
+      const a = k / RING * Math.PI * 2;
+      const ca = Math.cos(a), sa = Math.sin(a);
+      const o = (i * (RING + 1) + k) * 3;
+      pos[o] = cx + sx * ca * rr; pos[o + 1] = cy + sa * rr * 0.82; pos[o + 2] = cz + sy * ca * rr;
+      nor[o] = sx * ca; nor[o + 1] = sa; nor[o + 2] = sy * ca;
+      const u = (i * (RING + 1) + k) * 2;
+      // u = 0.5 on the back (a = 90°), the belly at the edges.
+      uv[u] = ((k / RING) + 0.25) % 1; uv[u + 1] = along / (r * 6);
+    }
+  }
+  g2.setDrawRange(0, Math.max(0, n - 1) * RING * 6);
+  g2.attributes.position.needsUpdate = true; g2.attributes.normal.needsUpdate = true; g2.attributes.uv.needsUpdate = true;
+  const hx = X(0), hy = Y(0);
+  const a = ang !== undefined && ang !== 0 ? ang : Math.atan2(Y(0) - Y(2), X(0) - X(2));
+  p.head.position.set(hx, r * 0.75, hy);
+  p.head.rotation.set(0, -a, 0);
+  p.head.scale.setScalar(r * 1.05);
+  // The tongue flicks out now and then.
+  const ph = (now / 1000 + (s.name ? s.name.length : 0)) % 2.2;
+  p.head.tongue.visible = ph < 0.35;
+  p.head.tongue.scale.x = ph < 0.35 ? 0.6 + Math.sin(ph * 40) * 0.4 : 1;
 }
 
 const _m = new THREE.Matrix4(), _q = new THREE.Quaternion(), _p = new THREE.Vector3(), _s = new THREE.Vector3(), _e = new THREE.Euler();
-function drawSerpent(s, pts, r, ang, now) {
-  const p = poolFor(s);
-  const n = Math.min(MAXSEG, pts.length);
-  for (let i = 0; i < n; i++) {
-    const q = pts[i];
-    const x = q.x !== undefined ? q.x : q[0], y = q.y !== undefined ? q.y : q[1];
-    const taper = i > n - 8 ? 0.45 + 0.07 * (n - i) : 1;
-    const rr = r * taper;
-    _m.compose(_p.set(x, rr * 0.85, y), _q.identity(), _s.set(rr, rr * 0.85, rr));
-    p.body.setMatrixAt(i, _m);
-  }
-  p.body.count = n;
-  p.body.instanceMatrix.needsUpdate = true;
-  if (p.body.instanceColor) p.body.instanceColor.needsUpdate = true;
-  const h = pts[0];
-  const hx = h.x !== undefined ? h.x : h[0], hy = h.y !== undefined ? h.y : h[1];
-  p.head.position.set(hx, r * 1.0, hy);
-  p.head.rotation.set(0, -(ang || 0), 0);
-  p.head.scale.setScalar(r * 1.15);
-}
-
 // Food: one instanced crystal set, each tinted.
 const foodMesh = new THREE.InstancedMesh(new THREE.OctahedronGeometry(1, 0), new THREE.MeshBasicMaterial({ color: 0xffffff }), 1400);
 foodMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
@@ -409,6 +499,7 @@ function render3d(now) {
   dropPools(live);
   drawFood(now);
   stars.position.copy(camera.position);
+  key.target.position.copy(at); key.position.copy(at).add(new THREE.Vector3(200, 600, 300));
   renderer.render(scene, camera);
 }
 const replayKeys = [];
